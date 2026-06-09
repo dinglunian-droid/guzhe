@@ -912,7 +912,7 @@ Rules:
 - If 3 fractures are visible, return 3 fracture_regions objects
 - If 2 fractures are visible, return 2 fracture_regions objects
 - If no fracture is visible, return fracture_regions as []
-- ${descLangInstr}
+- ${descLangInstr}`;
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -982,6 +982,8 @@ displayResults(result);
     btnAnalyze.disabled = false;
     btnAnalyze.classList.remove('loading');
     btnText.textContent = t('btnReAnalyze');
+}
+
 }
 function generateMockResult() {
   const classes = FRACTURES.map(f => f.name.en);
