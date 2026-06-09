@@ -914,37 +914,32 @@ Rules:
 - If no fracture is visible, return fracture_regions as []
 - ${descLangInstr}`;
 
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 1000,
-        messages: [{
-          role: 'user',
-          content: [
-            { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64Data } },
-            { type: 'text', text: prompt }
-          ]
-        }]
-      })
-    });
+const response = await fetch('/.netlify/functions/claude', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({
+    base64Data,
+    mediaType,
+    prompt,
+    lang: currentLang
+  })
+});
 
-    if (!response.ok) throw new Error('API error: ' + response.status);
-    const apiData = await response.json();
-    const rawText = apiData.content.filter(b => b.type === 'text').map(b => b.text).join('');
-    const cleaned = rawText.replace(/```json|```/g, '').trim();
+if (!response.ok) {
+  throw new Error('API error: ' + response.status);
+}
 
-const result = JSON.parse(cleaned);
+// ===== 拿到 Netlify 返回 =====
+const apiData = await response.json();
+const result = apiData || {};
 
 // ===== 安全检查 =====
-if (!result.predictions) {
-  result.predictions = {};
-}
-
-if (!Array.isArray(result.fracture_regions)) {
-  result.fracture_regions = [];
-}
+result.predictions = result.predictions || {};
+result.fracture_regions = Array.isArray(result.fracture_regions)
+  ? result.fracture_regions
+  : [];
 
 // ===== Normalize key names =====
 const normalizedPreds = {};
@@ -959,21 +954,28 @@ FRACTURES.forEach(f => {
   normalizedPreds[enName] =
     matchKey ? result.predictions[matchKey] : 0;
 });
-       const total = Object.values(normalizedPreds).reduce((a, b) => a + b, 0);
-    if (total > 0 && Math.abs(total - 1.0) > 0.01) {
-      Object.keys(normalizedPreds).forEach(k => { normalizedPreds[k] /= total; });
-    }
-result.predictions = normalizedPreds;
-result.boxes = result.fracture_regions || [];
 
+// ===== 归一化 =====
+const total = Object.values(normalizedPreds).reduce((a, b) => a + b, 0);
+
+if (total > 0 && Math.abs(total - 1.0) > 0.01) {
+  Object.keys(normalizedPreds).forEach(k => {
+    normalizedPreds[k] /= total;
+  });
+}
+
+result.predictions = normalizedPreds;
+result.boxes = result.fracture_regions;
+
+// ===== Debug =====
 console.log("Claude Result:", result);
 console.log("Fracture Regions:", result.fracture_regions);
 console.log("Box Count:", result.boxes.length);
 
+// ===== UI 更新 =====
 scanOverlay.classList.remove('active');
 displayResults(result);
-
- 
+    
 } catch(e) {
     scanOverlay.classList.remove('active');
     console.error('Claude API error:', e);
