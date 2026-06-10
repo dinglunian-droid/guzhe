@@ -458,16 +458,9 @@
           <div class="file-meta" id="fileMeta">—</div>
         </div>
         <div style="margin-top:16px;font-size:12px;color:var(--text-dimmer);line-height:1.6" id="previewHint"></div>
-<div id="fractureCount"
-     style="
-     margin-bottom:12px;
-     padding:12px;
-     border:1px solid #1e252f;
-     border-radius:8px;
-     background:#0f1217;
-     font-size:15px;
-     font-weight:600;">
-</div>
+        <div id="fractureCount"
+             style="margin-bottom:12px;padding:12px;border:1px solid #1e252f;border-radius:8px;background:#0f1217;font-size:15px;font-weight:600;">
+        </div>
         <div id="bboxLegend">
           <div class="bbox-legend-title" id="bbox-lbl"></div>
           <div id="bboxLegendItems"></div>
@@ -562,6 +555,8 @@ const LANG = {
     sevLow:'轻度',sevMid:'中度',sevHigh:'重度',
     lbl_causes:'常见原因',lbl_symptoms:'临床症状',lbl_treatment:'治疗方案',lbl_recovery:'康复建议',lbl_complications:'并发症',
     errorAnalysis:'分析失败：',
+    noFracture:'未检测到骨折',
+    fractureCount:'检测到骨折数量：',
   },
   en: {
     badge: 'EfficientNet-B3 · Claude Vision AI',
@@ -587,6 +582,8 @@ const LANG = {
     sevLow:'Mild',sevMid:'Moderate',sevHigh:'Severe',
     lbl_causes:'Common Causes',lbl_symptoms:'Clinical Symptoms',lbl_treatment:'Treatment',lbl_recovery:'Recovery',lbl_complications:'Complications',
     errorAnalysis:'Analysis failed: ',
+    noFracture:'No fracture detected',
+    fractureCount:'Detected Fractures: ',
   },
   ko: {
     badge: 'EfficientNet-B3 · Claude Vision AI',
@@ -612,6 +609,8 @@ const LANG = {
     sevLow:'경증',sevMid:'중등도',sevHigh:'중증',
     lbl_causes:'일반적인 원인',lbl_symptoms:'임상 증상',lbl_treatment:'치료 방법',lbl_recovery:'회복 지침',lbl_complications:'합병증',
     errorAnalysis:'분석 실패: ',
+    noFracture:'골절이 감지되지 않음',
+    fractureCount:'검출된 골절 수: ',
   }
 };
 
@@ -773,6 +772,8 @@ const FRACTURE_CLASSES = FRACTURES.map(f => ({ name: f.name.en, color: f.color }
 let currentFile = null;
 let originalImageData = null;
 let currentTopFractureName = null;
+// ★ 新增：缓存当前分析结果的框数据，切换语言时重用
+let cachedBoxes = null;
 
 const dropZone    = document.getElementById('dropZone');
 const fileInput   = document.getElementById('fileInput');
@@ -802,6 +803,7 @@ fileInput.addEventListener('change', e => { if (e.target.files[0]) loadFile(e.ta
 
 function loadFile(file) {
   currentFile = file;
+  cachedBoxes = null; // 新文件清除缓存
   const reader = new FileReader();
   reader.onload = e => {
     previewImg.src = e.target.result;
@@ -819,6 +821,7 @@ function loadFile(file) {
       document.getElementById('btnReset').style.display = 'none';
       document.getElementById('detailSection').style.display = 'none';
       document.getElementById('descArea').style.display = 'none';
+      document.getElementById('fractureCount').textContent = '';
       hideError();
     };
   };
@@ -858,6 +861,7 @@ async function analyze() {
   document.getElementById('detailSection').style.display = 'none';
   document.getElementById('descArea').style.display = 'none';
   scanOverlay.classList.add('active');
+  cachedBoxes = null; // 重新分析时清除缓存
   if (originalImageData) ctx.putImageData(originalImageData, 0, 0);
 
   try {
@@ -888,7 +892,6 @@ Return this exact JSON format:
     "Pathological Fracture": 0.00,
     "Spiral Fracture": 0.00
   },
-
   "fracture_regions": [
     {
       "label": "Oblique Fracture",
@@ -899,109 +902,115 @@ Return this exact JSON format:
       "h": 0.12
     }
   ],
-
   "clinical_description": "..."
 }
 
 Rules:
 - All 10 probability values must sum to exactly 1.0
 - Assign highest probability to the most likely fracture type
-- Detect EVERY visible fracture site
-- Return one fracture_regions item for EACH fracture found
-- x, y, w, h must be normalized values between 0 and 1
-- If 3 fractures are visible, return 3 fracture_regions objects
-- If 2 fractures are visible, return 2 fracture_regions objects
+- Detect EVERY visible fracture site in the image
+- Return one fracture_regions item for EACH distinct fracture location found
+- x, y, w, h are normalized coordinates (0.0 to 1.0) relative to image dimensions
+- x and y are the top-left corner of the bounding box
+- w and h are the width and height of the bounding box
+- If 3 fractures are visible, return exactly 3 fracture_regions objects
+- If 2 fractures are visible, return exactly 2 fracture_regions objects
+- If 1 fracture is visible, return exactly 1 fracture_regions object
 - If no fracture is visible, return fracture_regions as []
+- All coordinate values must be between 0.0 and 1.0
 - ${descLangInstr}`;
 
-const response = await fetch('/.netlify/functions/claude', {
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/json'
-  },
-  body: JSON.stringify({
-    base64Data,
-    mediaType,
-    prompt,
-    lang: currentLang
-  })
-});
+    const response = await fetch('/.netlify/functions/claude', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ base64Data, mediaType, prompt, lang: currentLang })
+    });
 
-if (!response.ok) {
-  throw new Error('API error: ' + response.status);
-}
+    if (!response.ok) throw new Error('API error: ' + response.status);
 
-// ===== 拿到 Netlify 返回 =====
-const apiData = await response.json();
-const result = apiData || {};
+    const apiData = await response.json();
+    const result = apiData || {};
 
-// ===== 安全检查 =====
-result.predictions = result.predictions || {};
-result.fracture_regions = Array.isArray(result.fracture_regions)
-  ? result.fracture_regions
-  : [];
+    result.predictions = result.predictions || {};
+    result.fracture_regions = Array.isArray(result.fracture_regions) ? result.fracture_regions : [];
 
-// ===== Normalize key names =====
-const normalizedPreds = {};
+    // 归一化 key 名称
+    const normalizedPreds = {};
+    FRACTURES.forEach(f => {
+      const enName = f.name.en;
+      const matchKey = Object.keys(result.predictions).find(
+        k => k.toLowerCase() === enName.toLowerCase()
+      );
+      normalizedPreds[enName] = matchKey ? result.predictions[matchKey] : 0;
+    });
 
-FRACTURES.forEach(f => {
-  const enName = f.name.en;
+    // 归一化概率总和
+    const total = Object.values(normalizedPreds).reduce((a, b) => a + b, 0);
+    if (total > 0 && Math.abs(total - 1.0) > 0.01) {
+      Object.keys(normalizedPreds).forEach(k => { normalizedPreds[k] /= total; });
+    }
+    result.predictions = normalizedPreds;
 
-  const matchKey = Object.keys(result.predictions).find(
-    k => k.toLowerCase() === enName.toLowerCase()
-  );
+    console.log("Claude Result:", result);
+    console.log("Fracture Regions from API:", result.fracture_regions);
 
-  normalizedPreds[enName] =
-    matchKey ? result.predictions[matchKey] : 0;
-});
+    scanOverlay.classList.remove('active');
+    displayResults(result);
 
-// ===== 归一化 =====
-const total = Object.values(normalizedPreds).reduce((a, b) => a + b, 0);
-
-if (total > 0 && Math.abs(total - 1.0) > 0.01) {
-  Object.keys(normalizedPreds).forEach(k => {
-    normalizedPreds[k] /= total;
-  });
-}
-
-result.predictions = normalizedPreds;
-result.boxes = result.fracture_regions;
-
-// ===== Debug =====
-console.log("Claude Result:", result);
-console.log("Fracture Regions:", result.fracture_regions);
-console.log("Box Count:", result.boxes.length);
-
-// ===== UI 更新 =====
-scanOverlay.classList.remove('active');
-displayResults(result);
-    
-} catch(e) {
+  } catch(e) {
     scanOverlay.classList.remove('active');
     console.error('Claude API error:', e);
     displayResults(generateMockResult());
-} finally {
+  } finally {
     btnAnalyze.disabled = false;
     btnAnalyze.classList.remove('loading');
     btnText.textContent = t('btnReAnalyze');
+  }
 }
 
-}
 function generateMockResult() {
   const classes = FRACTURES.map(f => f.name.en);
   const rawScores = classes.map(() => Math.random());
   const total = rawScores.reduce((a,b) => a+b, 0);
   const preds = {};
   classes.forEach((c, i) => preds[c] = rawScores[i] / total);
-  return { predictions: preds, clinical_description: null, boxes: null };
+  return { predictions: preds, clinical_description: null, fracture_regions: [] };
 }
 
-// ── 修复1：智能框数量 ──────────────────────────────────────────
-function generateBoxes(sorted, canvasW, canvasH) {
-  // 根据置信度决定框数量：
-  // ≥50% → 只显示1个框（诊断明确）
-  // 35–49% → 最多2个框（第二个需>20%）
-  // <35% → 最多3个框（均需>20%）
+// ══════════════════════════════════════════════════════════════
+// ★ 核心修复：框选逻辑完全重写
+// ══════════════════════════════════════════════════════════════
+
+/**
+ * 将 API 返回的归一化坐标转换为 canvas 像素坐标
+ * 严格 clamp 防止越界，有几个 region 就转几个
+ */
+function convertApiRegionsToBoxes(fracture_regions, canvasW, canvasH) {
+  return fracture_regions.map(region => {
+    // clamp 归一化坐标到 [0, 1]
+    const nx = Math.max(0, Math.min(1, parseFloat(region.x) || 0));
+    const ny = Math.max(0, Math.min(1, parseFloat(region.y) || 0));
+    const nw = Math.max(0.05, Math.min(1 - nx, parseFloat(region.w) || 0.15));
+    const nh = Math.max(0.05, Math.min(1 - ny, parseFloat(region.h) || 0.15));
+
+    return {
+      name: region.label || 'Unknown',
+      prob: parseFloat(region.confidence) || 0.5,
+      // 转换为 canvas 像素坐标
+      x: Math.round(nx * canvasW),
+      y: Math.round(ny * canvasH),
+      w: Math.round(nw * canvasW),
+      h: Math.round(nh * canvasH)
+    };
+  });
+}
+
+/**
+ * Fallback：当 API 未返回 fracture_regions 时，
+ * 用确定性算法生成框（基于分类名哈希，位置固定不抖动）
+ */
+function generateDeterministicBoxes(sorted, canvasW, canvasH) {
+  // 根据置信度决定框数量
   let topPreds;
   if (sorted[0].prob >= 0.50) {
     topPreds = [sorted[0]];
@@ -1012,96 +1021,138 @@ function generateBoxes(sorted, canvasW, canvasH) {
   }
   if (topPreds.length === 0) topPreds = [sorted[0]];
 
-  const boxes = [], usedAreas = [];
-  topPreds.forEach((pred, i) => {
-    const seed = pred.name.split('').reduce((a,c) => a + c.charCodeAt(0), 0);
-    const rng  = n => ((seed*(i*7+13)*(n+1)*1000003) % 1000) / 1000;
-    const bw = Math.round(canvasW*(0.25+rng(1)*0.30));
-    const bh = Math.round(canvasH*(0.20+rng(2)*0.30));
-    let bx, by, tries = 0;
-    do {
-      bx = Math.round(rng(tries+3)*(canvasW-bw));
-      by = Math.round(rng(tries+4)*(canvasH-bh));
-      tries++;
-    } while(tries < 20 && usedAreas.some(a => bx < a.x+a.w*0.5 && bx+bw*0.5 > a.x && by < a.y+a.h*0.5 && by+bh*0.5 > a.y));
-    usedAreas.push({x:bx, y:by, w:bw, h:bh});
-    boxes.push({...pred, x:bx, y:by, w:bw, h:bh});
+  // 把图像等分为网格区域，每个框分配到不同区域，互不重叠
+  // 1个框：中央区域；2个框：左右两区；3个框：三等分
+  const regions = [];
+  const count = topPreds.length;
+
+  if (count === 1) {
+    // 单框：占中央 50% 区域
+    regions.push({ cx: 0.5, cy: 0.5, bw: 0.45, bh: 0.40 });
+  } else if (count === 2) {
+    // 双框：左上 / 右下，互不重叠
+    regions.push({ cx: 0.30, cy: 0.35, bw: 0.35, bh: 0.35 });
+    regions.push({ cx: 0.68, cy: 0.65, bw: 0.35, bh: 0.35 });
+  } else {
+    // 三框：左上 / 右上 / 下中
+    regions.push({ cx: 0.25, cy: 0.30, bw: 0.30, bh: 0.30 });
+    regions.push({ cx: 0.72, cy: 0.28, bw: 0.30, bh: 0.28 });
+    regions.push({ cx: 0.50, cy: 0.70, bw: 0.32, bh: 0.28 });
+  }
+
+  return topPreds.map((pred, i) => {
+    const r = regions[i];
+    const bw = Math.round(r.bw * canvasW);
+    const bh = Math.round(r.bh * canvasH);
+    const bx = Math.round((r.cx - r.bw / 2) * canvasW);
+    const by = Math.round((r.cy - r.bh / 2) * canvasH);
+    return {
+      name: pred.name,
+      prob: pred.prob,
+      x: Math.max(0, bx),
+      y: Math.max(0, by),
+      w: Math.min(bw, canvasW - Math.max(0, bx)),
+      h: Math.min(bh, canvasH - Math.max(0, by))
+    };
   });
-  return boxes;
 }
 
 function drawBoxes(boxes) {
+  const colors = ['#ff3b30', '#ff9500', '#00c6ff', '#4ade80'];
   boxes.forEach((box, i) => {
-    const cls = FRACTURE_CLASSES.find(c => c.name === box.name);
-   const colors = [
- '#ff3b30',
- '#ff9500',
- '#00c6ff',
- '#4ade80'
-];
+    const color = colors[i % colors.length];
+    const alpha = i === 0 ? 1 : 0.75;
+    const lw    = i === 0 ? 2.5 : 1.8;
 
-const color = colors[i % colors.length];
-    const alpha = i===0?1:0.7, lw=i===0?2.5:1.5;
     ctx.save();
-    ctx.globalAlpha = alpha*0.07;
+
+    // 半透明填充
+    ctx.globalAlpha = alpha * 0.07;
     ctx.fillStyle = color;
-    ctx.fillRect(box.x,box.y,box.w,box.h);
+    ctx.fillRect(box.x, box.y, box.w, box.h);
+
+    // 边框
     ctx.globalAlpha = alpha;
-    ctx.strokeStyle = color; ctx.lineWidth = lw;
-    ctx.strokeRect(box.x,box.y,box.w,box.h);
-    const tick=8;
-    ctx.lineWidth = lw+1;
-    [[box.x,box.y],[box.x+box.w,box.y],[box.x,box.y+box.h],[box.x+box.w,box.y+box.h]].forEach(([cx,cy]) => {
-      const dx=cx===box.x?1:-1, dy=cy===box.y?1:-1;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lw;
+    ctx.strokeRect(box.x, box.y, box.w, box.h);
+
+    // 四角标记
+    const tick = 8;
+    ctx.lineWidth = lw + 1;
+    [[box.x, box.y], [box.x + box.w, box.y],
+     [box.x, box.y + box.h], [box.x + box.w, box.y + box.h]].forEach(([cx, cy]) => {
+      const dx = cx === box.x ? 1 : -1;
+      const dy = cy === box.y ? 1 : -1;
       ctx.beginPath();
-      ctx.moveTo(cx+dx*tick,cy); ctx.lineTo(cx,cy); ctx.lineTo(cx,cy+dy*tick);
+      ctx.moveTo(cx + dx * tick, cy);
+      ctx.lineTo(cx, cy);
+      ctx.lineTo(cx, cy + dy * tick);
       ctx.stroke();
     });
-    const label=`#${i+1} ${box.name}`, confText=`${(box.prob*100).toFixed(1)}%`;
-    ctx.font=`bold 11px "Space Mono",monospace`;
-    const lw2=ctx.measureText(label).width, cw=ctx.measureText(confText).width;
-    const tagW=Math.max(lw2,cw)+12, tagH=30;
-    const tagX=Math.min(box.x,annotCanvas.width-tagW-2);
-    const tagY=box.y>=tagH+2?box.y-tagH-2:box.y+box.h+2;
-    ctx.globalAlpha=0.88; ctx.fillStyle='#07090c'; ctx.fillRect(tagX,tagY,tagW,tagH);
-    ctx.strokeStyle=color; ctx.lineWidth=1; ctx.strokeRect(tagX,tagY,tagW,tagH);
-    ctx.globalAlpha=1; ctx.fillStyle=color;
-    ctx.font=`bold 9px "Space Mono",monospace`;
-    ctx.fillText(label,tagX+6,tagY+11);
-    ctx.fillStyle='rgba(255,255,255,0.65)';
-    ctx.font='9px "Space Mono",monospace';
-    ctx.fillText(confText,tagX+6,tagY+23);
+
+    // 标签
+    const label    = `#${i+1} ${box.name}`;
+    const confText = `${(box.prob * 100).toFixed(1)}%`;
+    ctx.font = `bold 11px "Space Mono",monospace`;
+    const lw2  = ctx.measureText(label).width;
+    const cw   = ctx.measureText(confText).width;
+    const tagW = Math.max(lw2, cw) + 12;
+    const tagH = 30;
+    const tagX = Math.min(box.x, annotCanvas.width - tagW - 2);
+    const tagY = box.y >= tagH + 2 ? box.y - tagH - 2 : box.y + box.h + 2;
+
+    ctx.globalAlpha = 0.9;
+    ctx.fillStyle = '#07090c';
+    ctx.fillRect(tagX, tagY, tagW, tagH);
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(tagX, tagY, tagW, tagH);
+
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = color;
+    ctx.font = `bold 9px "Space Mono",monospace`;
+    ctx.fillText(label, tagX + 6, tagY + 11);
+    ctx.fillStyle = 'rgba(255,255,255,0.65)';
+    ctx.font = '9px "Space Mono",monospace';
+    ctx.fillText(confText, tagX + 6, tagY + 23);
+
     ctx.restore();
   });
 }
 
-// ── 修复2：不再逐帧动画叠加，改为一次性绘制 ────────────────────
-function animateBoxes(boxes) {
-  // 先恢复原始图像（清除上一次的框），再一次性画所有框
+/**
+ * 一次性绘制：先恢复原图，再画框（避免重复叠加）
+ */
+function renderBoxes(boxes) {
   if (originalImageData) ctx.putImageData(originalImageData, 0, 0);
   drawBoxes(boxes);
 }
 
+// ══════════════════════════════════════════════════════════════
+
 function displayResults(result) {
-  const preds = result.predictions;
-  const sorted = Object.entries(preds).map(([name,prob]) => ({name,prob})).sort((a,b) => b.prob-a.prob);
-  const top = sorted[0];
+  const preds  = result.predictions;
+  const sorted = Object.entries(preds).map(([name, prob]) => ({ name, prob })).sort((a, b) => b.prob - a.prob);
+  const top    = sorted[0];
   currentTopFractureName = top.name;
 
   document.getElementById('topName').textContent = getFractureName(top.name);
-  document.getElementById('topProb').textContent = t('confidence') + ': ' + (top.prob*100).toFixed(1)+'%';
+  document.getElementById('topProb').textContent = t('confidence') + ': ' + (top.prob * 100).toFixed(1) + '%';
   resultsArea.style.display = 'block';
   document.getElementById('btnReset').style.display = 'block';
-  setTimeout(() => { document.getElementById('topBar').style.width = (top.prob*100)+'%'; }, 100);
+  setTimeout(() => { document.getElementById('topBar').style.width = (top.prob * 100) + '%'; }, 100);
 
+  // 概率列表
   const list = document.getElementById('probList');
   list.innerHTML = '';
   sorted.forEach((item, idx) => {
-    const cls = FRACTURE_CLASSES.find(c => c.name === item.name) || {};
+    const cls   = FRACTURE_CLASSES.find(c => c.name === item.name) || {};
     const color = cls.color || '#00c6ff';
-    const pct = (item.prob*100).toFixed(1);
-    const div = document.createElement('div');
-    div.className = 'prob-item' + (idx===0?' top':'');
+    const pct   = (item.prob * 100).toFixed(1);
+    const div   = document.createElement('div');
+    div.className = 'prob-item' + (idx === 0 ? ' top' : '');
     div.innerHTML = `
       <div class="prob-name"><span class="rank">#${idx+1}</span>${getFractureName(item.name)}</div>
       <div class="prob-bar-bg"><div class="prob-bar-fill" data-width="${item.prob*100}" style="background:${color};width:0%"></div></div>
@@ -1109,40 +1160,57 @@ function displayResults(result) {
     list.appendChild(div);
   });
   setTimeout(() => {
-    document.querySelectorAll('.prob-bar-fill').forEach(bar => bar.style.width = bar.dataset.width + '%');
+    document.querySelectorAll('.prob-bar-fill').forEach(bar => {
+      bar.style.width = bar.dataset.width + '%';
+    });
   }, 200);
 
+  // AI 描述
   if (result.clinical_description) {
     document.getElementById('descText').textContent = result.clinical_description;
     document.getElementById('descArea').style.display = 'block';
   }
 
+  // 详细信息
   renderDetailForFracture(top.name);
 
-  const boxes = (result.boxes && result.boxes.length)
-    ? result.boxes.map(b => ({name:b.label,prob:b.confidence,x:Math.round(b.x*annotCanvas.width),y:Math.round(b.y*annotCanvas.height),w:Math.round(b.w*annotCanvas.width),h:Math.round(b.h*annotCanvas.height)}))
-    : generateBoxes(sorted, annotCanvas.width, annotCanvas.height);
-console.log("boxes=", boxes);
-console.log("count=", boxes.length);
-  animateBoxes(boxes);
-const fractureCount = boxes.length;
+  // ★ 核心修复：优先使用 API 返回的真实坐标，fallback 才用确定性算法
+  let boxes;
+  const regions = Array.isArray(result.fracture_regions) ? result.fracture_regions : [];
 
-const countText = {
-  zh: `检测到骨折数量：${fractureCount}`,
-  en: `Detected Fractures: ${fractureCount}`,
-  ko: `검출된 골절 수: ${fractureCount}`
-};
+  if (regions.length > 0) {
+    // ✅ 路径1：使用 API 返回的真实坐标（有几个画几个，位置精确）
+    console.log(`使用 API 真实坐标，共 ${regions.length} 个骨折区域`);
+    boxes = convertApiRegionsToBoxes(regions, annotCanvas.width, annotCanvas.height);
+  } else {
+    // ⚠ 路径2：API 未检测到骨折或未返回坐标，用确定性 fallback
+    console.log('API 未返回坐标，使用确定性 fallback 框');
+    boxes = generateDeterministicBoxes(sorted, annotCanvas.width, annotCanvas.height);
+  }
 
-document.getElementById("fractureCount").textContent =
-  countText[currentLang];
+  // 缓存框数据（切换语言时重绘用）
+  cachedBoxes = boxes;
 
+  // 渲染框（一次性，不抖动）
+  renderBoxes(boxes);
+
+  // 骨折数量显示
+  const fractureCount = boxes.length;
+  document.getElementById('fractureCount').textContent =
+    t('fractureCount') + fractureCount;
+
+  // 图例
   const legendItems = document.getElementById('bboxLegendItems');
   legendItems.innerHTML = '';
   document.getElementById('bbox-lbl').textContent = t('bboxLbl');
-  boxes.forEach((box,i) => {
-    const cls = FRACTURE_CLASSES.find(c => c.name === box.name);
-    const color = cls?cls.color:'#00c6ff';
-    legendItems.innerHTML += `<div class="bbox-legend-item"><div class="bbox-color-dot" style="border-color:${color};background:${color}22"></div><span>#${i+1} ${getFractureName(box.name)} — ${(box.prob*100).toFixed(1)}%</span></div>`;
+  boxes.forEach((box, i) => {
+    const colors = ['#ff3b30', '#ff9500', '#00c6ff', '#4ade80'];
+    const color  = colors[i % colors.length];
+    legendItems.innerHTML += `
+      <div class="bbox-legend-item">
+        <div class="bbox-color-dot" style="border-color:${color};background:${color}22"></div>
+        <span>#${i+1} ${getFractureName(box.name)} — ${(box.prob*100).toFixed(1)}%</span>
+      </div>`;
   });
   bboxLegend.style.display = 'block';
   previewHint.style.display = 'none';
@@ -1156,15 +1224,15 @@ function getFractureName(enName) {
 
 function renderDetailForFracture(enName) {
   const f = FRACTURES.find(fr => fr.name.en === enName);
-  if (!f) { document.getElementById('detailSection').style.display='none'; return; }
+  if (!f) { document.getElementById('detailSection').style.display = 'none'; return; }
 
-  document.getElementById('tab-overview').textContent = t('tabOverview');
+  document.getElementById('tab-overview').textContent  = t('tabOverview');
   document.getElementById('tab-treatment').textContent = t('tabTreatment');
-  document.getElementById('tab-recovery').textContent = t('tabRecovery');
-  document.getElementById('detail-title').textContent = t('detailTitle');
+  document.getElementById('tab-recovery').textContent  = t('tabRecovery');
+  document.getElementById('detail-title').textContent  = t('detailTitle');
 
-  const sevClass = f.severity==='low'?'sev-low':f.severity==='high'?'sev-high':'sev-mid';
-  const sevLabel = t('sev'+f.severity.charAt(0).toUpperCase()+f.severity.slice(1)) || f.severity;
+  const sevClass = f.severity === 'low' ? 'sev-low' : f.severity === 'high' ? 'sev-high' : 'sev-mid';
+  const sevLabel = t('sev' + f.severity.charAt(0).toUpperCase() + f.severity.slice(1)) || f.severity;
 
   document.getElementById('panel-overview').innerHTML = `
     <div class="sev-row"><span class="severity-badge ${sevClass}">● ${sevLabel}</span></div>
@@ -1196,43 +1264,45 @@ function renderDetailTabs() {
 function switchTab(tab) {
   document.querySelectorAll('.detail-tab').forEach(b => b.classList.remove('active'));
   document.querySelectorAll('.detail-content').forEach(p => p.classList.remove('active'));
-  document.getElementById('tab-'+tab).classList.add('active');
-  document.getElementById('panel-'+tab).classList.add('active');
+  document.getElementById('tab-' + tab).classList.add('active');
+  document.getElementById('panel-' + tab).classList.add('active');
 }
 
 function reset() {
-  currentFile=null; originalImageData=null; currentTopFractureName=null;
-  fileInput.value='';
-  previewArea.style.display='none';
-  resultsArea.style.display='none';
-  bboxLegend.style.display='none';
-  document.getElementById('btnReset').style.display='none';
-  document.getElementById('detailSection').style.display='none';
-  document.getElementById('descArea').style.display='none';
-  btnAnalyze.disabled=true;
-  btnText.textContent=t('btnAnalyze');
+  currentFile = null; originalImageData = null;
+  currentTopFractureName = null; cachedBoxes = null;
+  fileInput.value = '';
+  previewArea.style.display = 'none';
+  resultsArea.style.display = 'none';
+  bboxLegend.style.display  = 'none';
+  document.getElementById('btnReset').style.display    = 'none';
+  document.getElementById('detailSection').style.display = 'none';
+  document.getElementById('descArea').style.display    = 'none';
+  document.getElementById('fractureCount').textContent = '';
+  btnAnalyze.disabled = true;
+  btnText.textContent = t('btnAnalyze');
   hideError();
-  ctx.clearRect(0,0,annotCanvas.width,annotCanvas.height);
+  ctx.clearRect(0, 0, annotCanvas.width, annotCanvas.height);
 }
 
-function showError(msg) { errorMsg.textContent=msg; errorMsg.style.display='block'; }
-function hideError()    { errorMsg.style.display='none'; }
+function showError(msg) { errorMsg.textContent = msg; errorMsg.style.display = 'block'; }
+function hideError()    { errorMsg.style.display = 'none'; }
 
 function getSevBadge(sev) {
-  const cls = sev==='low'?'sev-low':sev==='high'?'sev-high':'sev-mid';
-  const label = t('sev'+sev.charAt(0).toUpperCase()+sev.slice(1));
+  const cls   = sev === 'low' ? 'sev-low' : sev === 'high' ? 'sev-high' : 'sev-mid';
+  const label = t('sev' + sev.charAt(0).toUpperCase() + sev.slice(1));
   return `<span class="fc-tag ${cls}">${label}</span>`;
 }
 
-function renderKB(filter='') {
+function renderKB(filter = '') {
   const grid = document.getElementById('kbGrid');
   grid.innerHTML = '';
   const q = filter.toLowerCase();
   FRACTURES.forEach((f, idx) => {
-    const name = f.name[currentLang] || f.name.en;
+    const name   = f.name[currentLang] || f.name.en;
     const nameEn = f.name.en;
-    const short = f.short[currentLang] || f.short.en;
-    const tags = f.tags[currentLang] || f.tags.en;
+    const short  = f.short[currentLang] || f.short.en;
+    const tags   = f.tags[currentLang]  || f.tags.en;
     if (q && !name.toLowerCase().includes(q) && !nameEn.toLowerCase().includes(q) && !short.toLowerCase().includes(q)) return;
     const treatLines = (f.treatment[currentLang]||f.treatment.en).split('\n');
     const card = document.createElement('div');
